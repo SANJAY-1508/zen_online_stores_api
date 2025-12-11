@@ -1,207 +1,185 @@
 <?php
-
 include 'db/config.php';
+
 header('Content-Type: application/json; charset=utf-8');
+// Change this in production:
+// header('Access-Control-Allow-Origin: https://yourdomain.com');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST, GET, PUT, DELETE, OPTIONS');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, Authorization');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
     exit();
 }
 
-$json = file_get_contents('php://input');
-$obj = json_decode($json);
-$output = array();
+$input = json_decode(file_get_contents('php://input'));
+if (json_last_error() !== JSON_ERROR_NONE) {
+    echo json_encode([
+        "head" => ["code" => 400, "msg" => "Invalid JSON"]
+    ]);
+    exit;
+}
+
+$output = ["head" => ["code" => 400, "msg" => "Invalid request"]];
 
 date_default_timezone_set('Asia/Calcutta');
-$timestamp = date('Y-m-d H:i:s');
-
 $method = $_SERVER['REQUEST_METHOD'];
 
-// Input variables (derived from POST/PUT/DELETE payload or GET request)
-$unit_name = isset($obj->unit_name) ? trim($obj->unit_name) : null;
-$unit_code = isset($obj->unit_code) ? trim($obj->unit_code) : null;
-$company_id = isset($obj->company_id) ? trim($obj->company_id) : null;
-$unit_id = isset($obj->unit_id) ? $obj->unit_id : null; 
-$user_id = isset($obj->user_id) ? $obj->user_id : null; 
-$created_name = isset($obj->created_name) ? $obj->created_name : null; 
+// Extract inputs safely
+$unit_name    = isset($input->unit_name) ? trim($input->unit_name) : null;
+$unit_code    = isset($input->unit_code) ? trim($input->unit_code) : null;
+$company_id   = isset($input->company_id) ? trim($input->company_id) : null;
+$user_id      = $input->user_id ?? null;
+$created_name = $input->created_name ?? null;
 
-// Helper flags to distinguish actions
-$is_read_action = isset($obj->fetch_all) || (isset($obj->unit_id) && !isset($obj->update_action) && !isset($obj->delete_action));
-$is_create_action = $unit_name && $unit_code && $company_id && !isset($obj->unit_id) && !isset($obj->update_action) && !isset($obj->delete_action);
-$is_update_action = $unit_id && $company_id && isset($obj->update_action);
-$is_delete_action = $unit_id && $company_id && isset($obj->delete_action);
+// Action flags
+$is_fetch     = $method === 'POST' && (isset($input->fetch_all) || isset($input->unit_code));
+$is_create    = $method === 'POST' && $unit_name && $company_id && !isset($input->update_action) && !isset($input->delete_action);
+$is_update    = in_array($method, ['POST', 'PUT']) && $unit_code && $company_id && isset($input->update_action);
+$is_delete    = in_array($method, ['POST', 'DELETE']) && $unit_code && $company_id && isset($input->delete_action);
 
-//List Units
-if ($method === 'POST' && $is_read_action) {   
+// ==================================================================
+// 1. FETCH UNITS (by company_id or single unit_code)
+// ==================================================================
+if ($is_fetch) {
     if (empty($company_id)) {
-        $output["head"]["code"] = 400;
-        $output["head"]["msg"] = "Company ID is required to fetch units.";
-        goto end_script;
+        $output["head"]["msg"] = "company_id is required";
+        goto end;
     }
-    if (isset($obj->unit_id) && $obj->unit_id !== null) {
 
-        $sql = "SELECT `id`, `unit_name`, `unit_code`, `company_id`, `created_date` 
-                FROM `unit` 
-                WHERE `id` = ? AND `company_id` = ? AND `deleted_at` = 0";
+    if (!empty($input->unit_code)) {
+        // Fetch single unit
+        $sql = "SELECT unit_code, unit_name, company_id, created_date 
+                FROM unit 
+                WHERE unit_code = ? AND company_id = ? AND deleted_at = 0";
         $stmt = $conn->prepare($sql);
-        $stmt->bind_param("is", $unit_id, $company_id);
+        $stmt->bind_param("ss", $input->unit_code, $company_id);
     } else {
-        // FETCH ALL UNITS for a company
-        $sql = "SELECT `id`, `unit_name`, `unit_code`, `company_id`, `created_date` 
-                FROM `unit` 
-                WHERE `company_id` = ? AND `deleted_at` = 0 ORDER BY `unit_name` ASC";
+        // Fetch all units for company
+        $sql = "SELECT unit_code, unit_name, company_id, created_date 
+                FROM unit 
+                WHERE company_id = ?  AND deleted_at = 0
+                ORDER BY unit_name ASC";
         $stmt = $conn->prepare($sql);
         $stmt->bind_param("s", $company_id);
     }
+
     $stmt->execute();
     $result = $stmt->get_result();
-    $units = [];
+    $units = $result->fetch_all(MYSQLI_ASSOC);
 
-    if ($result->num_rows > 0) {
-        while ($row = $result->fetch_assoc()) {
-            $units[] = $row;
-        }
-        $output["head"]["code"] = 200;
-        $output["head"]["msg"] = "Success";
+    if (count($units) > 0) {
+        $output["head"] = ["code" => 200, "msg" => "Success"];
         $output["body"]["units"] = $units;
     } else {
-        $output["head"]["code"] = 404;
-        $output["head"]["msg"] = "No units found.";
+        $output["head"] = ["code" => 404, "msg" => "No units found"];
     }
     $stmt->close();
-
-} 
-
-//Create Unit
-else if ($method === 'POST' && $is_create_action) {
-
-    if (!empty($unit_name) && !empty($unit_code) && !empty($company_id)) {
-        // 1. Check if Unit already exists (Duplicate prevention)
-        $check_sql = "SELECT `id` FROM `unit` WHERE `unit_code` = ? AND `company_id` = ? AND `deleted_at` = 0";
-        $check_stmt = $conn->prepare($check_sql);
-        $check_stmt->bind_param("ss", $unit_code, $company_id);
-        $check_stmt->execute();
-        $check_result = $check_stmt->get_result();
-        
-        if ($check_result->num_rows > 0) {
-            $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Unit with code '$unit_code' already exists for this company.";
-            $check_stmt->close();
-            goto end_script;
-        }
-        $check_stmt->close();
-        // 2. Insert the new Unit record
-        $insert_sql = "INSERT INTO `unit` (`unit_name`, `unit_code`, `company_id`, `created_by`, `created_name`) 
-                       VALUES (?, ?, ?, ?, ?)";
-        
-        $insert_stmt = $conn->prepare($insert_sql);
-        $insert_stmt->bind_param("sssis", 
-            $unit_name, $unit_code, $company_id, $user_id, $created_name
-        );
-
-        if ($insert_stmt->execute()) {
-            $output["head"]["code"] = 200;
-            $output["head"]["msg"] = "Unit created successfully.";
-            $output["body"]["new_id"] = $conn->insert_id;
-        } else {
-            $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Failed to create unit. Error: " . $insert_stmt->error;
-        }
-        $insert_stmt->close();
-
-    } else {
-        $output["head"]["code"] = 400;
-        $output["head"]["msg"] = "Unit Name, Unit Code, and Company ID are required.";
-    }
+    goto end;
 }
 
-//Update Unit
-else if (($method === 'POST' || $method === 'PUT') && $is_update_action) {
-    if (!empty($unit_name) && !empty($unit_code)) {
-        
-        // 1. Check for duplicate unit code (if code is being changed)
-        $check_sql = "SELECT `id` FROM `unit` WHERE `unit_code` = ? AND `company_id` = ? AND `id` != ? AND `deleted_at` = 0";
-        $check_stmt = $conn->prepare($check_sql);
-        $check_stmt->bind_param("ssi", $unit_code, $company_id, $unit_id);
-        $check_stmt->execute();
-        $check_result = $check_stmt->get_result();
-        
-        if ($check_result->num_rows > 0) {
-            $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Unit code '$unit_code' is already used by another unit.";
-            $check_stmt->close();
-            goto end_script;
-        }
-        $check_stmt->close();
-
-        // 2. Update the Unit record
-        $update_sql = "UPDATE `unit` SET `unit_name` = ?, `unit_code` = ? 
-                       WHERE `id` = ? AND `company_id` = ?";
-        
-        $update_stmt = $conn->prepare($update_sql);
-        $update_stmt->bind_param("ssis", 
-            $unit_name, $unit_code, $unit_id, $company_id
-        );
-
-        if ($update_stmt->execute()) {
-            if ($update_stmt->affected_rows > 0) {
-                $output["head"]["code"] = 200;
-                $output["head"]["msg"] = "Unit updated successfully.";
-            } else {
-                $output["head"]["code"] = 200;
-                $output["head"]["msg"] = "Unit updated successfully (No changes made).";
-            }
-        } else {
-            $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Failed to update unit. Error: " . $update_stmt->error;
-        }
-        $update_stmt->close();
-
-    } else {
-        $output["head"]["code"] = 400;
-        $output["head"]["msg"] = "Unit Name and Unit Code are required for update.";
+// ==================================================================
+// 2. CREATE UNIT
+// ==================================================================
+else if ($is_create) {
+    if (empty($unit_name) || empty($company_id)) {
+        $output["head"]["msg"] = "unit_name and company_id are required";
+        goto end;
     }
 
+    // Auto-generate unit_code: U001, U002...
+    $sql = "SELECT unit_code FROM unit WHERE unit_code REGEXP '^U[0-9]+$' ORDER BY CAST(SUBSTRING(unit_code, 2) AS UNSIGNED) DESC LIMIT 1";
+    $last = $conn->query($sql)->fetch_assoc();
+    $next_num = $last ? ((int)substr($last['unit_code'], 1)) + 1 : 1;
+    $unit_code = 'U' . str_pad($next_num, 4, '0', STR_PAD_LEFT); // U0001, U0002...
+
+    // Check duplicate unit name
+    $check = $conn->prepare("SELECT 1 FROM unit WHERE unit_name = ? AND company_id = ? AND deleted_at = 0");
+    $check->bind_param("ss", $unit_name, $company_id);
+    $check->execute();
+    if ($check->get_result()->num_rows > 0) {
+        $output["head"]["msg"] = "Unit name already exists";
+        $check->close();
+        goto end;
+    }
+    $check->close();
+
+    $stmt = $conn->prepare("INSERT INTO unit 
+        (unit_code, unit_name, company_id, created_by, created_name, created_date) 
+        VALUES (?, ?, ?, ?, ?, NOW())");
+
+    $stmt->bind_param("sssss", $unit_code, $unit_name, $company_id, $user_id, $created_name);
+
+    if ($stmt->execute()) {
+        $output["head"] = ["code" => 200, "msg" => "Unit created successfully"];
+        $output["body"] = [
+            "unit_code" => $unit_code,
+            "unit_name" => $unit_name
+        ];
+    } else {
+        $output["head"] = ["code" => 500, "msg" => "Database error: " . $stmt->error];
+    }
+    $stmt->close();
+    goto end;
 }
 
-//Delete Unit
-else if (($method === 'POST' || $method === 'DELETE') && $is_delete_action) {
-
-    // Perform Soft Delete
-    $delete_sql = "UPDATE `unit` SET `deleted_at` = 1 
-                   WHERE `id` = ? AND `company_id` = ?";
-    
-    $delete_stmt = $conn->prepare($delete_sql);
-    $delete_stmt->bind_param("is", $unit_id, $company_id);
-
-    if ($delete_stmt->execute()) {
-        if ($delete_stmt->affected_rows > 0) {
-            $output["head"]["code"] = 200;
-            $output["head"]["msg"] = "Unit deleted successfully."; 
-        } else {
-            $output["head"]["code"] = 404;
-            $output["head"]["msg"] = "Unit not found or already deleted.";
-        }
-    } else {
-        $output["head"]["code"] = 400;
-        $output["head"]["msg"] = "Failed to delete unit. Error: " . $delete_stmt->error;
+// ==================================================================
+// 3. UPDATE UNIT
+// ==================================================================
+else if ($is_update) {
+    if (empty($unit_name)) {
+        $output["head"]["msg"] = "unit_name is required for update";
+        goto end;
     }
-    $delete_stmt->close();
 
-} 
-// =========================================================================
-// Mismatch / Fallback
-// =========================================================================
+    // Check if unit exists and belongs to company
+    $check = $conn->prepare("SELECT 1 FROM unit WHERE unit_code = ? AND company_id = ? AND deleted_at = 0");
+    $check->bind_param("ss", $unit_code, $company_id);
+    $check->execute();
+    if ($check->get_result()->num_rows === 0) {
+        $output["head"]["msg"] = "Unit not found or access denied";
+        $check->close();
+        goto end;
+    }
+    $check->close();
+
+    $stmt = $conn->prepare("UPDATE unit SET unit_name = ? WHERE unit_code = ? AND company_id = ?");
+    $stmt->bind_param("sss", $unit_name, $unit_code, $company_id);
+
+    if ($stmt->execute() && $stmt->affected_rows > 0) {
+        $output["head"] = ["code" => 200, "msg" => "Unit updated successfully"];
+    } else {
+        $output["head"]["msg"] = "No changes made or unit not found";
+    }
+    $stmt->close();
+    goto end;
+}
+
+// ==================================================================
+// 4. DELETE UNIT (Soft Delete)
+// ==================================================================
+else if ($is_delete) {
+    $stmt = $conn->prepare("UPDATE unit SET deleted_at = NOW() WHERE unit_code = ? AND company_id = ? AND deleted_at = 0");
+    $stmt->bind_param("ss", $unit_code, $company_id);
+
+    if ($stmt->execute() && $stmt->affected_rows > 0) {
+        $output["head"] = ["code" => 200, "msg" => "Unit deleted successfully"];
+    } else {
+        $output["head"] = ["code" => 404, "msg" => "Unit not found or already deleted"];
+    }
+    $stmt->close();
+    goto end;
+}
+
+// ==================================================================
+// DEFAULT: Invalid Request
+// ==================================================================
 else {
-    $output["head"]["code"] = 400;
-    $output["head"]["msg"] = "Parameter or request method is Mismatch for the operation requested.";
+    $output["head"]["msg"] = "Invalid action or parameters";
 }
 
-end_script:
-// Close the database connection at the end
+end:
 $conn->close();
-
-echo json_encode($output, JSON_NUMERIC_CHECK);
+echo json_encode($output, JSON_UNESCAPED_UNICODE);
 ?>
