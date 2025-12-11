@@ -1,5 +1,4 @@
 <?php
-
 include 'db/config.php';
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
@@ -20,12 +19,11 @@ date_default_timezone_set('Asia/Calcutta');
 $company_id     = isset($obj->company_id) ? trim($obj->company_id) : null;
 $product_id     = isset($obj->product_id) ? trim($obj->product_id) : null; 
 $product_name   = isset($obj->product_name) ? trim($obj->product_name) : null;
-$product_img    = isset($obj->product_img) ? $obj->product_img : null;
+$product_img    = isset($obj->product_img) ? $obj->product_img : null; // Base64 string
 $product_code   = isset($obj->product_code) ? trim($obj->product_code) : null;
 $unit_code      = isset($obj->unit_code) ? trim($obj->unit_code) : null;
 $category_code  = isset($obj->category_code) ? trim($obj->category_code) : null;
 
-// Convert incoming numerical strings to floats/ints for safety
 $product_price  = isset($obj->product_price) ? floatval($obj->product_price) : null;
 $product_stock  = isset($obj->product_stock) ? intval($obj->product_stock) : null;
 $product_disc   = isset($obj->product_disc) ? floatval($obj->product_disc) : null;
@@ -35,14 +33,12 @@ $id             = isset($obj->id) ? $obj->id : null;
 $user_id        = isset($obj->user_id) ? $obj->user_id : null; 
 $created_name   = isset($obj->created_name) ? $obj->created_name : null; 
 
-
-// Helper flags to distinguish actions (relies on product_id for U/D)
+// Helper flags
 $method = $_SERVER['REQUEST_METHOD'];
 $is_read_action = isset($obj->fetch_all) || (isset($obj->id) && !isset($obj->update_action) && !isset($obj->delete_action));
 $is_create_action = $product_name && $product_code && $company_id && $unit_code && $category_code && !isset($obj->id) && !isset($obj->product_id) && !isset($obj->update_action) && !isset($obj->delete_action);
 $is_update_action = $product_id && $company_id && isset($obj->update_action); 
 $is_delete_action = $product_id && $company_id && isset($obj->delete_action);
-
 
 // Utility function to generate a product ID (e.g., PROD-000001)
 function generateProductId($conn) {
@@ -54,19 +50,51 @@ function generateProductId($conn) {
     return 'PROD-' . str_pad($next_id, 6, '0', STR_PAD_LEFT);
 }
 
-// =========================================================================
-// R - READ (LIST/FETCH) - Uses LEFT JOIN
-// =========================================================================
 
+// ===================================================================
+// Image Upload Function (Base64 → WebP)
+// ===================================================================
+function saveBase64Image($base64String, $uploadDir = "../uploads/products/")
+{
+    if (empty($base64String)) return null;
+
+    // Create directory if not exists
+    if (!is_dir($uploadDir)) {
+        mkdir($uploadDir, 0777, true);
+    }
+
+    // Remove data URL prefix
+    if (preg_match('/^data:image\/[a-z]+;base64,/', $base64String)) {
+        $base64String = preg_replace('/^data:image\/[a-z]+;base64,/', '', $base64String);
+    }
+
+    $imageData = base64_decode($base64String);
+    if ($imageData === false) return null;
+
+    $source = @imagecreatefromstring($imageData);
+    if ($source === false) return null;
+
+    $timestamp = str_replace([' ', ':'], '-', date('Y-m-d H:i:s'));
+    $filename = $timestamp . '.webp';
+    $filepath = $uploadDir . $filename;
+
+    $success = imagewebp($source, $filepath, 80); // 80% quality
+    imagedestroy($source);
+
+    return $success ? $filename : null;
+}
+
+// ===================================================================
+// R - READ (Fetch Products + Full Image URL)
+// ===================================================================
 if ($method === 'POST' && $is_read_action) {
     
     if (empty($company_id)) {
         $output["head"]["code"] = 400;
-        $output["head"]["msg"] = "Company ID is required to fetch products.";
+        $output["head"]["msg"] = "Company ID is required.";
         goto end_script;
     }
 
-    // IMPORTANT: Assuming your unit table is named 'unit' based on the FK error
     $select_cols = "p.*, u.unit_name, c.category_name";
     $from_tables = "`product` p 
                     LEFT JOIN `unit` u ON p.unit_code = u.unit_code AND u.deleted_at = 0
@@ -74,17 +102,14 @@ if ($method === 'POST' && $is_read_action) {
     $where_clause = "p.company_id = ? AND p.deleted_at = 0";
 
     if (isset($obj->id) && $obj->id !== null) {
-        // FETCH SINGLE PRODUCT by internal ID
         $sql = "SELECT {$select_cols} FROM {$from_tables} WHERE {$where_clause} AND p.id = ?";
         $stmt = $conn->prepare($sql);
         $stmt->bind_param("si", $company_id, $id);
     } else if (isset($obj->product_id) && $obj->product_id !== null) {
-        // FETCH SINGLE PRODUCT by external product_id
         $sql = "SELECT {$select_cols} FROM {$from_tables} WHERE {$where_clause} AND p.product_id = ?";
         $stmt = $conn->prepare($sql);
         $stmt->bind_param("ss", $company_id, $product_id);
     } else {
-        // FETCH ALL PRODUCTS for a company
         $sql = "SELECT {$select_cols} FROM {$from_tables} WHERE {$where_clause} ORDER BY p.product_name ASC";
         $stmt = $conn->prepare($sql);
         $stmt->bind_param("s", $company_id);
@@ -94,163 +119,192 @@ if ($method === 'POST' && $is_read_action) {
     $result = $stmt->get_result();
     $products = [];
 
-    if ($result->num_rows > 0) {
-        while ($row = $result->fetch_assoc()) {
-            $products[] = $row;
+    $baseUrl = "http://" . $_SERVER['SERVER_NAME'] . "/zen_online_stores/uploads/products/";
+
+    while ($row = $result->fetch_assoc()) {
+        if (!empty($row['product_img'])) {
+            $row['product_img_url'] = $baseUrl . $row['product_img'];
+        } else {
+            $row['product_img_url'] = null;
         }
-        $output["head"]["code"] = 200;
-        $output["head"]["msg"] = "Success";
-        $output["body"]["products"] = $products;
-    } else {
-        $output["head"]["code"] = 404;
-        $output["head"]["msg"] = "No products found.";
+        $products[] = $row;
     }
+
+    $output["head"]["code"] = 200;
+    $output["head"]["msg"] = "Success";
+    $output["body"]["products"] = $products;
+
     $stmt->close();
-} 
-// =========================================================================
-// C - CREATE (Product)
-// =========================================================================
+}
+
+// ===================================================================
+// C - CREATE
+// ===================================================================
 else if ($method === 'POST' && $is_create_action) {
 
-    if (!empty($product_name) && !empty($product_code) && !empty($unit_code) && !empty($category_code)) {
-
-        // 1. Check if Product Code already exists for this company
-        $check_sql = "SELECT `id` FROM `product` WHERE `product_code` = ? AND `company_id` = ? AND `deleted_at` = 0";
-        $check_stmt = $conn->prepare($check_sql);
-        $check_stmt->bind_param("ss", $product_code, $company_id);
-        $check_stmt->execute();
-        $check_result = $check_stmt->get_result();
-        
-        if ($check_result->num_rows > 0) {
-            $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Product with code '$product_code' already exists for this company.";
-            $check_stmt->close();
-            goto end_script;
-        }
-        $check_stmt->close();
-        $new_product_id = generateProductId($conn);
-        $insert_sql = "INSERT INTO `product` (`product_id`, `company_id`, `product_name`, `product_img`, `product_code`, `unit_code`, `category_code`, `product_price`, `product_stock`, `product_disc`, `product_disc_amt`, `created_by`, `created_name`) 
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        
-        $insert_stmt = $conn->prepare($insert_sql);
-        $insert_stmt->bind_param("sssssssssssss", 
-            $new_product_id, $company_id, $product_name, $product_img, $product_code, $unit_code, 
-            $category_code, $product_price, $product_stock, $product_disc, $product_disc_amt, 
-            $user_id, $created_name
-        );
-
-        if ($insert_stmt->execute()) {
-            $output["head"]["code"] = 200;
-            $output["head"]["msg"] = "Product created successfully.";
-            $output["body"]["new_id"] = $conn->insert_id;
-            $output["body"]["product_id"] = $new_product_id;
-        } else {
-            $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Failed to create product. Error: " . $insert_stmt->error;
-        }
-        $insert_stmt->close();
-
-    } else {
+    if (empty($product_name) || empty($product_code) || empty($unit_code) || empty($category_code)) {
         $output["head"]["code"] = 400;
-        $output["head"]["msg"] = "Product Name, Product Code, Unit Code, and Category Code are required.";
+        $output["head"]["msg"] = "Required fields are missing.";
+        goto end_script;
     }
+
+    // Check duplicate product_code
+    $check = $conn->prepare("SELECT id FROM product WHERE product_code = ? AND company_id = ? AND deleted_at = 0");
+    $check->bind_param("ss", $product_code, $company_id);
+    $check->execute();
+    if ($check->get_result()->num_rows > 0) {
+        $output["head"]["code"] = 400;
+        $output["head"]["msg"] = "Product code already exists.";
+        $check->close();
+        goto end_script;
+    }
+    $check->close();
+
+    // Handle image upload
+    $savedImageName = saveBase64Image($product_img);
+
+    $new_product_id = generateProductId($conn);
+
+    $stmt = $conn->prepare("INSERT INTO `product` 
+        (`product_id`, `company_id`, `product_name`, `product_img`, `product_code`, `unit_code`, `category_code`, 
+         `product_price`, `product_stock`, `product_disc`, `product_disc_amt`, `created_by`, `created_name`) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+
+    $stmt->bind_param("sssssssssssss", 
+        $new_product_id, $company_id, $product_name, $savedImageName, $product_code, $unit_code, 
+        $category_code, $product_price, $product_stock, $product_disc, $product_disc_amt, 
+        $user_id, $created_name
+    );
+
+    if ($stmt->execute()) {
+        $output["head"]["code"] = 200;
+        $output["head"]["msg"] = "Product created successfully.";
+        $output["body"]["product_id"] = $new_product_id;
+        $output["body"]["image_url"] = $savedImageName ? "https://{$_SERVER['SERVER_NAME']}/uploads/products/{$savedImageName}" : null;
+    } else {
+        $output["head"]["code"] = 500;
+        $output["head"]["msg"] = "DB Error: " . $stmt->error;
+    }
+    $stmt->close();
 }
-// =========================================================================
-// U - UPDATE (Product) - Uses product_id
-// =========================================================================
+
+// ===================================================================
+// U - UPDATE
+// ===================================================================
 else if (($method === 'POST' || $method === 'PUT') && $is_update_action) {
 
-    $target_product_id = $product_id;
+    if (empty($product_id) || empty($product_name) || empty($product_code)) {
+        $output["head"]["code"] = 400;
+        $output["head"]["msg"] = "Product ID, Name and Code are required for update.";
+        goto end_script;
+    }
 
-    if (!empty($target_product_id) && !empty($product_name) && !empty($product_code) && !empty($unit_code) && !empty($category_code)) {
-        
-        // 1. Check for duplicate product code, EXCLUDING the product being updated by product_id
-        $check_sql = "SELECT `id` FROM `product` WHERE `product_code` = ? AND `company_id` = ? AND `product_id` != ? AND `deleted_at` = 0";
-        $check_stmt = $conn->prepare($check_sql);
-        $check_stmt->bind_param("sss", $product_code, $company_id, $target_product_id); 
-        $check_stmt->execute();
-        $check_result = $check_stmt->get_result();
-        
-        if ($check_result->num_rows > 0) {
+    // Check duplicate code (exclude current product)
+    $check = $conn->prepare("SELECT id FROM product WHERE product_code = ? AND company_id = ? AND product_id != ? AND deleted_at = 0");
+    $check->bind_param("sss", $product_code, $company_id, $product_id);
+    $check->execute();
+    if ($check->get_result()->num_rows > 0) {
+        $output["head"]["code"] = 400;
+        $output["head"]["msg"] = "Product code already used by another product.";
+        $check->close();
+        goto end_script;
+    }
+    $check->close();
+
+    // Handle new image if provided
+    $finalImageName = null;
+    if (!empty($product_img)) {
+        $finalImageName = saveBase64Image($product_img);
+        if ($finalImageName === null) {
             $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Product code '$product_code' is already used by another product.";
-            $check_stmt->close();
+            $output["head"]["msg"] = "Invalid image data.";
             goto end_script;
         }
-        $check_stmt->close();
-
-        // 2. Update the product record using product_id in the WHERE clause
-        $update_sql = "UPDATE `product` SET 
-                       `product_name`=?, `product_img`=?, `product_code`=?, 
-                       `unit_code`=?, `category_code`=?, `product_price`=?, 
-                       `product_stock`=?, `product_disc`=?, `product_disc_amt`=?
-                       WHERE `product_id` = ? AND `company_id` = ?";
-        
-        $update_stmt = $conn->prepare($update_sql);
-        // Bind parameters: 11 fields (9 update values + product_id + company_id)
-        $update_stmt->bind_param("sssssssssss", 
-            $product_name, $product_img, $product_code, $unit_code, $category_code, 
-            $product_price, $product_stock, $product_disc, $product_disc_amt, 
-            $target_product_id, $company_id
-        );
-
-        if ($update_stmt->execute()) {
-            if ($update_stmt->affected_rows > 0) {
-                $output["head"]["code"] = 200;
-                $output["head"]["msg"] = "Product updated successfully.";
-            } else {
-                $output["head"]["code"] = 200;
-                $output["head"]["msg"] = "Product updated successfully (No changes made or product_id not found).";
-            }
-        } else {
-            $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Failed to update product. Error: " . $update_stmt->error;
-        }
-        $update_stmt->close();
-
-    } else {
-        $output["head"]["code"] = 400;
-        $output["head"]["msg"] = "Required fields (including product_id) are missing for update.";
     }
 
+    // Build dynamic SET clause
+    $sets = [];
+    $types = "";
+    $params = [];
+
+    $fields = [
+        'product_name' => $product_name,
+        'product_code' => $product_code,
+        'unit_code' => $unit_code,
+        'category_code' => $category_code,
+        'product_price' => $product_price,
+        'product_stock' => $product_stock,
+        'product_disc' => $product_disc,
+        'product_disc_amt' => $product_disc_amt
+    ];
+
+    foreach ($fields as $col => $val) {
+        if ($val !== null) {
+            $sets[] = "`$col` = ?";
+            $params[] = $val;
+            $types .= is_numeric($val) ? "d" : "s";
+        }
+    }
+
+    if ($finalImageName !== null) {
+        $sets[] = "`product_img` = ?";
+        $params[] = $finalImageName;
+        $types .= "s";
+    }
+
+    if (empty($sets)) {
+        $output["head"]["code"] = 400;
+        $output["head"]["msg"] = "No fields to update.";
+        goto end_script;
+    }
+
+    $setClause = implode(", ", $sets);
+    $sql = "UPDATE `product` SET $setClause WHERE `product_id` = ? AND `company_id` = ?";
+    $params[] = $product_id;
+    $params[] = $company_id;
+    $types .= "ss";
+
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param($types, ...$params);
+
+    if ($stmt->execute() && $stmt->affected_rows > 0) {
+        $output["head"]["code"] = 200;
+        $output["head"]["msg"] = "Product updated successfully.";
+        if ($finalImageName) {
+            $output["body"]["image_url"] = "https://{$_SERVER['SERVER_NAME']}/uploads/products/{$finalImageName}";
+        }
+    } else {
+        $output["head"]["code"] = 400;
+        $output["head"]["msg"] = "No changes made or product not found.";
+    }
+    $stmt->close();
 }
-// =========================================================================
-// D - DELETE (Product - Soft Delete) - Uses product_id
-// =========================================================================
+
+// ===================================================================
+// D - DELETE (Soft)
+// ===================================================================
 else if (($method === 'POST' || $method === 'DELETE') && $is_delete_action) {
-
-    // Perform Soft Delete using product_id
-    $delete_sql = "UPDATE `product` SET `deleted_at` = 1 
-                   WHERE `product_id` = ? AND `company_id` = ?";
-    
-    $delete_stmt = $conn->prepare($delete_sql);
-    $delete_stmt->bind_param("ss", $product_id, $company_id);
-
-    if ($delete_stmt->execute()) {
-        if ($delete_stmt->affected_rows > 0) {
-            $output["head"]["code"] = 200;
-            $output["head"]["msg"] = "Product deleted successfully.";
-        } else {
-            $output["head"]["code"] = 404;
-            $output["head"]["msg"] = "Product not found or already deleted.";
-        }
+    $stmt = $conn->prepare("UPDATE `product` SET `deleted_at` = 1 WHERE `product_id` = ? AND `company_id` = ?");
+    $stmt->bind_param("ss", $product_id, $company_id);
+    if ($stmt->execute() && $stmt->affected_rows > 0) {
+        $output["head"]["code"] = 200;
+        $output["head"]["msg"] = "Product deleted successfully.";
     } else {
-        $output["head"]["code"] = 400;
-        $output["head"]["msg"] = "Failed to delete product. Error: " . $delete_stmt->error;
+        $output["head"]["code"] = 404;
+        $output["head"]["msg"] = "Product not found.";
     }
-    $delete_stmt->close();
+    $stmt->close();
+}
 
-} 
-// =========================================================================
-// Mismatch / Fallback
-// =========================================================================
+// ===================================================================
+// Fallback
+// ===================================================================
 else {
     $output["head"]["code"] = 400;
-    $output["head"]["msg"] = "Parameter or request method is Mismatch for the operation requested.";
+    $output["head"]["msg"] = "Invalid request or parameters missing.";
 }
 
 end_script:
 $conn->close();
-
-echo json_encode($output, JSON_NUMERIC_CHECK);
+echo json_encode($output, JSON_NUMERIC_CHECK | JSON_UNESCAPED_SLASHES);
 ?>
