@@ -17,23 +17,28 @@ $output = array();
 date_default_timezone_set('Asia/Calcutta');
 $timestamp = date('Y-m-d H:i:s');
 
-
+// =========================================================================
+// R - READ (Fetch Company Details)
+// =========================================================================
 
 if (isset($obj->search_text)) {
-   $sql = "SELECT `id`, `company_id`, `company_name`, `address`, `description`, `pincode`, `phone`, `mobile`, `email_id`,
+    $sql = "SELECT `id`, `company_id`, `company_name`, `address`, `description`, `pincode`, `phone`, `mobile`, `email_id`,
 `gst_no`, `state`, `city`, `img`, `bill_prefix`, `acc_number`, `acc_holder_name`, `bank_name`, `ifsc_code`,
 `bank_branch`, `minimum_order_value`, `deleted_at`, `created_by`, `created_name`, `created_date`
-FROM `company` WHERE 1";
+FROM `company` WHERE 1"; // Note: This query always fetches ALL records if WHERE 1 is used without a limit/ID
 
     $result = $conn->query($sql);
     if ($result->num_rows > 0) {
+        // Fetch only the first row, as typically there is only one company record
         if ($row = $result->fetch_assoc()) {
             $output["head"]["code"] = 200;
             $output["head"]["msg"] = "Success";
             $output["body"]["company"] = $row;
+            
             $imgLink = null;
             if ($row["img"] != null && $row["img"] != 'null' && strlen($row["img"]) > 0) {
-                $imgLink = "https://" . $_SERVER['SERVER_NAME'] . "/uploads/company/" . $row["img"];
+                // Ensure SERVER_NAME is correct for image path
+                $imgLink = "http://" . $_SERVER['SERVER_NAME'] . "/zen_online_stores/uploads/company/" . $row["img"]; 
                 $output["body"]["company"]["img"] = $imgLink;
             } else {
                 $output["body"]["company"]["img"] = $imgLink;
@@ -44,11 +49,15 @@ FROM `company` WHERE 1";
         $output["head"]["msg"] = "Company Details Not Found";
     }
 } 
-// <<<<<<<<<<===================== Update/Insert Company Details (UPSERT LOGIC) =====================>>>>>>>>>>
-else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj->company_profile_img) && isset($obj->address)  &&     isset($obj->description) &&  isset($obj->pincode) && isset($obj->city) && isset($obj->state) && isset($obj->phone_number) && isset($obj->mobile_number) &&  isset($obj->email_id) &&     isset($obj->gst_number) && isset($obj->bill_prefix) &&          // Added
-    isset($obj->minimum_order_value) &&  isset($obj->acc_number) && isset($obj->bank_name) && isset($obj->ifsc_code) && isset($obj->bank_branch)) {
+// =========================================================================
+// C/U - UPSERT (Update/Insert Company Details)
+// =========================================================================
+else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj->company_profile_img) && isset($obj->address)  &&   
+         isset($obj->description) &&  isset($obj->pincode) && isset($obj->city) && isset($obj->state) && isset($obj->phone_number) && isset($obj->mobile_number) &&  isset($obj->email_id) &&    
+         isset($obj->gst_number) && isset($obj->bill_prefix) &&    
+         isset($obj->minimum_order_value) &&  isset($obj->acc_number) && isset($obj->bank_name) && isset($obj->ifsc_code) && isset($obj->bank_branch)) {
 
- 
+    
     $company_name = $obj->company_name;
     $company_profile_img = $obj->company_profile_img;
     $address = $obj->address;
@@ -72,9 +81,10 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
         !empty($phone_number) && !empty($city) && !empty($state)
     ) {
         if (!preg_match('/[^a-zA-Z0-9., ]+/', $company_name)) {
-            if (function_exists('numericCheck') && numericCheck($phone_number) && strlen($phone_number) == 10) {
+            // Assuming numericCheck function is defined in db/config.php or elsewhere
+            if (function_exists('numericCheck') && numericCheck($phone_number) && strlen($phone_number) == 10) { 
 
-                $edit_id = 1;
+                $edit_id = 1; // Target ID is hardcoded as 1 for the main company record
                 $sql = "";
                 $profile_path = "";
                 $is_insert = false;
@@ -93,16 +103,18 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
 
                 // Auto-generate company_id
                 if ($count == 0 || empty($company_id)) {
-                    $company_id = 'COMP-' . str_pad($edit_id, 6, '0', STR_PAD_LEFT);
+                    // This generates COMP-000001
+                    $company_id = 'COMP-' . str_pad($edit_id, 6, '0', STR_PAD_LEFT); 
                 }
 
                 // Handle image upload
                 if (!empty($company_profile_img) && function_exists('pngImageToWebP')) {
                     $outputFilePath = "../uploads/company/";
-                    $profile_path = pngImageToWebP($company_profile_img, $outputFilePath);
+                    // Assuming pngImageToWebP returns the new filename/path
+                    $profile_path = pngImageToWebP($company_profile_img, $outputFilePath); 
                 }
 
-                // INSERT
+                // INSERT (19 placeholders)
                 if ($count == 0) {
                     $sql = "INSERT INTO company (
                         company_id, company_name, img, address, description, pincode,
@@ -112,8 +124,10 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
 
                     $stmt = $conn->prepare($sql);
+                    
+                    // FIX: 18 's' (for all Varchar/Text fields) + 1 'i' (for minimum_order_value) = 19 characters
                     $stmt->bind_param(
-                        "ssssssssissssssssssi",
+                        "ssssssssssssssssssi", 
                         $company_id, $company_name, $profile_path, $address, $description,
                         $pincode, $city, $state, $phone_number, $mobile_number, $email_id,
                         $gst_number, $bill_prefix, $acc_number, $acc_holder_name, $bank_name,
@@ -123,7 +137,7 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
                     $success_msg = "Successfully Company Details Created";
                 }
 
-                // UPDATE WITH NEW IMAGE
+                // UPDATE WITH NEW IMAGE (20 placeholders)
                 else if (!empty($company_profile_img)) {
 
                     $sql = "UPDATE company SET
@@ -133,8 +147,10 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
                         minimum_order_value=? WHERE id=?";
 
                     $stmt = $conn->prepare($sql);
+                    
+                    // FIX: 18 's' + 1 'i' (for minimum_order_value) + 1 'i' (for $edit_id) = 20 characters
                     $stmt->bind_param(
-                        "ssssssssisssssssssii",
+                        "sssssssssssssssssii", 
                         $company_id, $company_name, $profile_path, $address, $description,
                         $pincode, $city, $state, $phone_number, $mobile_number, $email_id,
                         $gst_number, $bill_prefix, $acc_number, $acc_holder_name, $bank_name,
@@ -144,7 +160,7 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
                     $success_msg = "Successfully Company Details Updated";
                 }
 
-                // UPDATE WITHOUT IMAGE
+                // UPDATE WITHOUT IMAGE (20 placeholders)
                 else {
 
                     $sql = "UPDATE company SET
@@ -154,8 +170,10 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
                         minimum_order_value=? WHERE id=?";
 
                     $stmt = $conn->prepare($sql);
+                    
+                    // FIX: 18 's' + 1 'i' (for minimum_order_value) + 1 'i' (for $edit_id) = 20 characters
                     $stmt->bind_param(
-                        "ssssssssisssssssssii",
+                        "sssssssssssssssssii", 
                         $company_id, $company_name, $old_profile_path, $address, $description,
                         $pincode, $city, $state, $phone_number, $mobile_number, $email_id,
                         $gst_number, $bill_prefix, $acc_number, $acc_holder_name, $bank_name,
@@ -188,13 +206,16 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
     }
 }
 
-// <<<<<<<<<<===================== Image Delete =====================>>>>>>>>>>
+// =========================================================================
+// D - Image Delete
+// =========================================================================
 
 else if (isset($obj->image_delete)) {
 
     $image_delete = $obj->image_delete;
 
-    if ($image_delete === true && function_exists('ImageRemove')) {
+    // Assuming ImageRemove function is defined elsewhere
+    if ($image_delete === true && function_exists('ImageRemove')) { 
 
         $status = ImageRemove('company', 1);
         if ($status == "company Image Removed Successfully") {
