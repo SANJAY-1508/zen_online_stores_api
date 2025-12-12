@@ -147,15 +147,15 @@ else if (isset($obj->company_name) && isset($obj->acc_holder_name) && isset($obj
                         minimum_order_value=? WHERE id=?";
 
                     $stmt = $conn->prepare($sql);
-                    
-                    // FIX: 18 's' + 1 'i' (for minimum_order_value) + 1 'i' (for $edit_id) = 20 characters
-                    $stmt->bind_param(
-                        "sssssssssssssssssii", 
-                        $company_id, $company_name, $profile_path, $address, $description,
-                        $pincode, $city, $state, $phone_number, $mobile_number, $email_id,
-                        $gst_number, $bill_prefix, $acc_number, $acc_holder_name, $bank_name,
-                        $ifsc_code, $bank_branch, $minimum_order_value, $edit_id
-                    );
+                   $stmt->bind_param(
+        "ssssssssssssssssssii",
+        $company_id, $company_name, $profile_path, $address, $description,
+        $pincode, $city, $state, $phone_number, $mobile_number, $email_id,
+        $gst_number, $bill_prefix, $acc_number, $acc_holder_name, $bank_name,
+        $ifsc_code, $bank_branch, 
+        $minimum_order_value, // Should be an 'i'
+        $edit_id // Should be an 'i'
+    );
 
                     $success_msg = "Successfully Company Details Updated";
                 }
