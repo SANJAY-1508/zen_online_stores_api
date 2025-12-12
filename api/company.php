@@ -17,9 +17,7 @@ $timestamp = date( 'Y-m-d H:i:s' );
 // ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  ===  =
 if ( isset( $obj->search_text ) ) {
     // FIX: Filter active records WHERE deleted_at = 0 ( assuming 0 means active, 1 means deleted )
-    $sql = "SELECT `id`, `company_id`, `company_name`, `address`, `description`, `pincode`, `phone`, `mobile`, `email_id`,
-`gst_no`, `state`, `city`, `img`, `bill_prefix`, `acc_number`, `acc_holder_name`, `bank_name`, `ifsc_code`,
-`bank_branch`, `minimum_order_value`, `deleted_at`, `created_by`, `created_name`, `created_date`
+    $sql = "SELECT *
 FROM `company` WHERE `deleted_at` = 0";
     $result = $conn->query( $sql );
     if ( $result->num_rows > 0 ) {
@@ -242,42 +240,80 @@ isset( $obj->minimum_order_value ) && isset( $obj->acc_number ) && isset( $obj->
     }
 }
 // =========================================================================
-// D - Soft Delete Company (NEW: Set deleted_at = 1)
+// D - Soft Delete Company (Set deleted_at = 1 for Company and all related records)
 // =========================================================================
 else if (isset($obj->delete_company)) {
     $company_id_to_delete = $obj->company_id ?? null;
+    
     if (empty($company_id_to_delete)) {
         $output["head"]["code"] = 400;
         $output["head"]["msg"] = "Missing company_id for deletion.";
     } else {
-        // Check if company exists and is active
-        $check_sql = "SELECT `id` FROM `company` WHERE `company_id` = ? AND `deleted_at` = 0";
-        $check_stmt = $conn->prepare($check_sql);
-        $check_stmt->bind_param("s", $company_id_to_delete);
-        $check_stmt->execute();
-        $check_result = $check_stmt->get_result();
-        $check_row = $check_result->fetch_assoc();
-        $check_stmt->close();
-      
-        $delete_id = $check_row['id'] ?? null;
-      
-        if ($delete_id) {
-            // Soft delete: UPDATE deleted_at = 1
-            $delete_sql = "UPDATE `company` SET `deleted_at` = 1 WHERE `id` = ?";
-            $delete_stmt = $conn->prepare($delete_sql);
-            $delete_stmt->bind_param("i", $delete_id);
-            if ($delete_stmt->execute()) {
-                $output["head"]["code"] = 200;
-                $output["head"]["msg"] = "Company soft deleted successfully.";
-                $output["body"]["company_id"] = $company_id_to_delete;
-            } else {
-                $output["head"]["code"] = 400;
-                $output["head"]["msg"] = "Failed to delete company: " . $delete_stmt->error;
+        
+        // --- Start Transaction ---
+        $conn->begin_transaction();
+
+        try {
+            // 1. Check if company exists and is active (using company_id)
+            $check_sql = "SELECT `id` FROM `company` WHERE `company_id` = ? AND `deleted_at` = 0";
+            $check_stmt = $conn->prepare($check_sql);
+            $check_stmt->bind_param("s", $company_id_to_delete);
+            $check_stmt->execute();
+            $check_result = $check_stmt->get_result();
+            $check_row = $check_result->fetch_assoc();
+            $check_stmt->close();
+            
+            if (!$check_row) {
+                // If company is not found or already deleted, throw an exception to rollback.
+                throw new Exception("Company not found or already deleted.");
             }
-            $delete_stmt->close();
-        } else {
+            
+            // 2. Define the tables to soft delete based on company_id
+            $tables_to_delete = [
+                "company",      // Primary table
+                "user",         // Related tables
+                "unit",
+                "category",
+                "product",
+                "order"
+                // Add any other company-specific tables here
+            ];
+
+            $error_table = null;
+
+            // 3. Perform Soft Delete on all tables
+            foreach ($tables_to_delete as $table) {
+                // All tables must have `company_id` and `deleted_at` columns.
+                $delete_sql = "UPDATE `$table` SET `deleted_at` = 1 WHERE `company_id` = ? AND `deleted_at` = 0";
+                $delete_stmt = $conn->prepare($delete_sql);
+                $delete_stmt->bind_param("s", $company_id_to_delete);
+                
+                if (!$delete_stmt->execute()) {
+                    $error_table = $table;
+                    $delete_stmt->close();
+                    throw new Exception("Failed to soft delete records in table: $error_table."); 
+                }
+                $delete_stmt->close();
+            }
+
+            // 4. Commit the transaction if all operations succeeded
+            $conn->commit();
+            
+            $output["head"]["code"] = 200;
+            $output["head"]["msg"] = "Company and all related records soft deleted successfully.";
+            $output["body"]["company_id"] = $company_id_to_delete;
+
+        } catch (Exception $e) {
+            // 5. Rollback the transaction on any failure
+            $conn->rollback();
+            
+            $msg = $e->getMessage();
+            if (strpos($msg, 'Failed to soft delete records') !== false) {
+                 $msg = "Deletion failed. Issue in table: **$error_table**. All changes rolled back.";
+            }
+
             $output["head"]["code"] = 400;
-            $output["head"]["msg"] = "Company not found or already deleted.";
+            $output["head"]["msg"] = $msg;
         }
     }
 }
